@@ -4,6 +4,7 @@ extern crate websocket;
 //extern crate futures;
 extern crate futures_await as futures;
 extern crate tokio_core;
+extern crate compactmap;
 
 use futures::prelude::*;
 
@@ -16,10 +17,12 @@ use futures::{Future, Sink, Stream};
 use std::rc::Rc;
 use std::cell::{RefCell};
 
+use compactmap::CompactMap;
+
 type UsualClient = websocket::client::async::Framed<tokio_core::net::TcpStream, websocket::async::MessageCodec<websocket::OwnedMessage>>;
 
 type ClientSink = futures::sync::mpsc::Sender<websocket::OwnedMessage>;
-type AllClients = Rc<RefCell<Vec<ClientSink>>>;
+type AllClients = Rc<RefCell<CompactMap<ClientSink>>>;
 
 #[async]
 fn serve_client(handle: Handle, client: UsualClient, all:AllClients) -> Result<(),()> {
@@ -29,13 +32,18 @@ fn serve_client(handle: Handle, client: UsualClient, all:AllClients) -> Result<(
     let writer = async_block! {
         #[async]
         for m in rcv {
+            let lastone = match &m {
+                &OwnedMessage::Close(_) => true,
+                _ => false,
+            };
             sink = await!(sink.send(m).map_err(|_|()))?;
+            if lastone { break; }
         }
         Ok::<(),()>(())
     };
     handle.spawn(writer);
     
-    all.borrow_mut().push(snd.clone());
+    let my_id : usize = all.borrow_mut().insert(snd.clone());
     
     #[async]
     for m in stream.map_err(|_|()) {
@@ -48,7 +56,10 @@ fn serve_client(handle: Handle, client: UsualClient, all:AllClients) -> Result<(
             OwnedMessage::Pong(_) => continue,
             _ => m,
         };
-        for i in all.borrow().iter() {
+        use std::ops::Deref;
+        for (id, i) in all.borrow().deref().into_iter() {
+            if id == my_id { continue; }
+            
             let mut q : ClientSink = i.clone();
             // Send if possible, throw away message if not ready
             if let Ok(_) = q.start_send(fwd.clone()) {
@@ -56,7 +67,10 @@ fn serve_client(handle: Handle, client: UsualClient, all:AllClients) -> Result<(
             }
         }
     }
-    // do not close
+    
+    if let Some(snd) = all.borrow_mut().take(my_id) {
+        let _ = snd.send(OwnedMessage::Close(None)).poll();
+    }
     Ok(())
 }
 
@@ -67,7 +81,7 @@ fn main() {
 
     let str = server.incoming().map_err(|_|());
     
-    let all_clients : AllClients = Rc::new(RefCell::new(vec![]));
+    let all_clients : AllClients = Rc::new(RefCell::new(CompactMap::new()));
     
     let f = async_block! {
         #[async]
