@@ -88,10 +88,14 @@ fn main() {
     let f = async_block! {
         #[async]
         for (upgrade, addr) in str {
-            println!("Got a connection from: {}", addr);
+            let url = format!("{}", upgrade.request.subject.1);
+            println!("+ {} -> {}", addr, url);
+            let (addr2, url2) = (addr.clone(), url.clone());
             let (client, _headers) = await!(upgrade.accept().map_err(|_|()))?;
             let f = serve_client(handle.clone(), client, all_clients.clone());
-            handle.spawn(f.map_err(|_|()).map(|_|()));
+            handle.spawn(f.map_err(|_|()).map(move |_|{
+                println!("- {} -> {}", addr2, url2);
+            }));
         }
         Ok::<(),()>(())
     };
