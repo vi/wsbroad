@@ -21,13 +21,13 @@ use compactmap::CompactMap;
 
 type UsualClient = websocket::client::async::Framed<tokio_core::net::TcpStream, websocket::async::MessageCodec<websocket::OwnedMessage>>;
 
-type ClientSink = futures::sync::mpsc::Sender<websocket::OwnedMessage>;
+type ClientSink = Rc<RefCell<futures::sync::mpsc::Sender<websocket::OwnedMessage>>>;
 type AllClients = Rc<RefCell<CompactMap<ClientSink>>>;
 
 #[async]
 fn serve_client(handle: Handle, client: UsualClient, all:AllClients) -> Result<(),()> {
     let (mut sink, stream) = client.split();
-    let (snd,rcv) = futures::sync::mpsc::channel::<OwnedMessage>(1);
+    let (snd,rcv) = futures::sync::mpsc::channel::<OwnedMessage>(3);
     
     let writer = async_block! {
         #[async]
@@ -43,7 +43,7 @@ fn serve_client(handle: Handle, client: UsualClient, all:AllClients) -> Result<(
     };
     handle.spawn(writer);
     
-    let my_id : usize = all.borrow_mut().insert(snd.clone());
+    let my_id : usize = all.borrow_mut().insert(Rc::new(RefCell::new(snd.clone())));
     
     #[async]
     for m in stream.map_err(|_|()) {
@@ -60,16 +60,18 @@ fn serve_client(handle: Handle, client: UsualClient, all:AllClients) -> Result<(
         for (id, i) in all.borrow().deref().into_iter() {
             if id == my_id { continue; }
             
-            let mut q : ClientSink = i.clone();
             // Send if possible, throw away message if not ready
-            if let Ok(_) = q.start_send(fwd.clone()) {
-                let _ = q.poll_complete();
+            let mut b = i.borrow_mut();
+            if let Ok(_) = b.start_send(fwd.clone()) {
+                let _ = b.poll_complete();
             }
         }
     }
     
     if let Some(snd) = all.borrow_mut().take(my_id) {
-        let _ = snd.send(OwnedMessage::Close(None)).poll();
+        if let Ok(snd) = Rc::try_unwrap(snd) {
+            let _ = snd.into_inner().send(OwnedMessage::Close(None)).poll();
+        }
     }
     Ok(())
 }
