@@ -33,15 +33,15 @@ fn serve_client(client: UsualClient) -> std::result::Result<(),()> {
 }
 
 fn main() {
-	let mut core = Core::new().unwrap();
-	let handle = core.handle();
-	let server = Server::bind("127.0.0.1:9002", &handle).unwrap();
+    let mut core = Core::new().unwrap();
+    let handle = core.handle();
+    let server = Server::bind("127.0.0.1:9002", &handle).unwrap();
 
-	let str = server.incoming().map_err(|_|());
-	
-	let f = async_block! {
-	    #[async]
-	    for (upgrade, addr) in str {
+    let str = server.incoming().map_err(|_|());
+    
+    let f = async_block! {
+        #[async]
+        for (upgrade, addr) in str {
             // accept the request to be a ws connection
             println!("Got a connection from: {}", addr);
             let (client, _headers) = await!(upgrade.accept().map_err(|_|()))?;
@@ -51,5 +51,5 @@ fn main() {
         Ok::<(),()>(())
     };
 
-	core.run(f).unwrap();
+    core.run(f).unwrap();
 }
