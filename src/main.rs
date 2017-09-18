@@ -82,9 +82,20 @@ fn serve_client(handle: Handle, client: UsualClient, all:AllClients) -> Result<(
 }
 
 fn main() {
+    let addr : String;
+    
+    {
+        let a = std::env::args().collect::<Vec<_>>();
+        if a.len() != 2 || a[1] == "--help" || a[1] == "-?" {
+            println!("Usage: wsbroad listen_ip:listen_port");
+            ::std::process::exit(1);
+        }
+        addr = a[1].clone();
+    }
+
     let mut core = Core::new().unwrap();
     let handle = core.handle();
-    let server = Server::bind("127.0.0.1:9002", &handle).unwrap();
+    let server = Server::bind(addr, &handle).unwrap();
 
     let str = server.incoming().map_err(|_|());
     
