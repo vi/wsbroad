@@ -15,7 +15,7 @@ use tokio_core::reactor::{Core, Handle};
 use futures::{Future, Sink, Stream};
 
 use std::rc::Rc;
-use std::cell::{RefCell};
+use std::cell::{RefCell,Cell};
 
 use compactmap::CompactMap;
 use std::collections::HashMap;
@@ -26,10 +26,13 @@ type ClientSink = Rc<RefCell<futures::sync::mpsc::Sender<websocket::OwnedMessage
 type AllClients = Rc<RefCell<CompactMap<ClientSink>>>;
 type Url2Clientset = HashMap<String, AllClients>;
 
+const BUFMSG : usize = 3;
+const MAXURLS : usize = 64;
+
 #[async]
 fn serve_client(handle: Handle, client: UsualClient, all:AllClients) -> Result<(),()> {
     let (mut sink, stream) = client.split();
-    let (snd,rcv) = futures::sync::mpsc::channel::<OwnedMessage>(3);
+    let (snd,rcv) = futures::sync::mpsc::channel::<OwnedMessage>(BUFMSG);
     
     let writer = async_block! {
         #[async]
@@ -86,6 +89,7 @@ fn main() {
     let str = server.incoming().map_err(|_|());
     
     let mapping : Rc<RefCell<Url2Clientset>> = Rc::new(RefCell::new(HashMap::new()));
+    let num_urls : Rc<Cell<usize>> = Rc::new(Cell::new(0));
     
     let f = async_block! {
         #[async]
@@ -94,18 +98,29 @@ fn main() {
             println!("+ {} -> {}", addr, url);
             let (addr2, url2) = (addr.clone(), url.clone());
             
-            let (client, _headers) = await!(upgrade.accept().map_err(|_|()))?;
-            
+            let num_urls2 = num_urls.clone();
             let map_ = mapping.clone();
             let map2_ = mapping.clone();
-            let mut map = map_.borrow_mut();
-            
-            if !map.contains_key(&*url) {
-                let new_clientset : AllClients = Rc::new(RefCell::new(CompactMap::new()));
-                map.insert(url.clone(), new_clientset);
-                println!("New URL: {}", url);
+            {
+                let mut map = map_.borrow_mut();
+                
+                if !map.contains_key(&*url) {
+                    if num_urls.get() >= MAXURLS {
+                        println!("Rejected");
+                        handle.spawn(upgrade.reject().map_err(|_|()).map(|_|()));
+                        continue;
+                    }
+                
+                    let new_clientset : AllClients = Rc::new(RefCell::new(CompactMap::new()));
+                    map.insert(url.clone(), new_clientset);
+                    println!("New URL: {}", url);
+                    num_urls.set(num_urls.get() + 1);
+                }
             }
             
+            let (client, _headers) = await!(upgrade.accept().map_err(|_|()))?;
+            
+            let map = map_.borrow_mut();
             let clientset : AllClients = map.get(&*url).unwrap().clone();
             
             let f = serve_client(handle.clone(), client, clientset);
@@ -123,6 +138,7 @@ fn main() {
                 }
                 if do_remove {
                     map.remove(&*url2);
+                    num_urls2.set(num_urls2.get() - 1);
                 }
             }));
         }
