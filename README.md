@@ -5,14 +5,14 @@ Each WebSocket message sent to a particular URL on this websocket server gets de
 
 ```
 $ wsbroad 127.0.0.1:9002
-+ 127.0.0.1:57208 -> /123
++ 127.0.0.1:57208 -> /baz
 New URL: /123
-+ 127.0.0.1:57209 -> /123
-+ 127.0.0.1:57211 -> /123
-- 127.0.0.1:57208 -> /123
-- 127.0.0.1:57211 -> /123
-- 127.0.0.1:57209 -> /123
-Expiring URL: /s
++ 127.0.0.1:57209 -> /baz
++ 127.0.0.1:57211 -> /baz
+- 127.0.0.1:57208 -> /baz
+- 127.0.0.1:57211 -> /baz
+- 127.0.0.1:57209 -> /baz
+Expiring URL: /baz
 ```
 
 For `wss://` server use some Nginx forwarding.
