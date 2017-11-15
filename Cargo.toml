@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Vitaly _Vi Shukela <vi0oss@gmail.com>"]
 
 [dependencies]
-futures-await = { git = 'https://github.com/alexcrichton/futures-await' }
+futures-await = { version = "0.1" }
 futures = "0.1"
 tokio-core = "0.1"
 tokio-io = "0.1"
