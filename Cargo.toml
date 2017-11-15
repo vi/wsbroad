@@ -3,7 +3,8 @@ name = "wsbroad"
 description = "[nightly-only] Websocket server that broadcasts each message to other clients connected to the same URL"
 version = "0.1.0"
 authors = ["Vitaly _Vi Shukela <vi0oss@gmail.com>"]
-keywords = ["websocket", "websockets", "rfc6455", "broadcast", "nightly", "application"]
+keywords = ["websocket", "websockets", "rfc6455", "broadcast", "nightly"]
+repository = "https://github.com/vi/wsbroad"
 categories = ["command-line-utilities", "network-programming", "web-programming", "web-programming::websocket"]
 license = "MIT/Apache-2.0"
 
