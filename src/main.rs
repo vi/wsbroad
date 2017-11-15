@@ -73,7 +73,7 @@ fn serve_client(handle: Handle, client: UsualClient, all:AllClients) -> Result<(
         }
     }
     
-    if let Some(snd) = all.borrow_mut().take(my_id) {
+    if let Some(snd) = all.borrow_mut().remove(my_id) {
         if let Ok(snd) = Rc::try_unwrap(snd) {
             let _ = snd.into_inner().send(OwnedMessage::Close(None)).poll();
         }
