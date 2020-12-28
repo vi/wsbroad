@@ -17,7 +17,7 @@ Expiring URL: /baz
 
 For `wss://` server use some Nginx forwarding.
 
-Currently requires Nightly Rust. There are pre-built versions:
+There are pre-built versions (legacy at the moment):
 
 * Linux: [wsbroad-x86_64-musl](https://github.com/vi/wsbroad/releases/download/0.1.0/wsbroad-x86_64-musl)
 * Windows: [wsbroad-i686-windows.exe](https://github.com/vi/wsbroad/releases/download/0.1.0/wsbroad-i686-windows.exe) (not tested)

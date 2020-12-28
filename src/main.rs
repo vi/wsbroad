@@ -1,88 +1,151 @@
-#![feature(proc_macro, conservative_impl_trait, generators)]
-
-extern crate websocket;
-//extern crate futures;
-extern crate futures_await as futures;
-extern crate tokio_core;
-extern crate compactmap;
-
-use futures::prelude::*;
-
-use websocket::message::OwnedMessage;
-use websocket::async::Server;
-
-use tokio_core::reactor::{Core, Handle};
-use futures::{Future, Sink, Stream};
+use futures::{StreamExt,SinkExt,FutureExt};
 
 use std::rc::Rc;
 use std::cell::{RefCell,Cell};
 
-use compactmap::CompactMap;
+use slab::Slab;
 use std::collections::HashMap;
 
-type UsualClient = websocket::client::async::Framed<tokio_core::net::TcpStream, websocket::async::MessageCodec<websocket::OwnedMessage>>;
+type Result<T> = std::result::Result<T, anyhow::Error>;
 
-type ClientSink = Rc<RefCell<futures::sync::mpsc::Sender<websocket::OwnedMessage>>>;
-type AllClients = Rc<RefCell<CompactMap<ClientSink>>>;
+use tungstenite::Message;
+
+type UsualClient = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+type ClientSink = Rc<RefCell< futures::stream::SplitSink<UsualClient, Message>  >>;
+type ClientStream = futures::stream::SplitStream<UsualClient>;
+type AllClients = Rc<RefCell<Slab<ClientSink>>>;
 type Url2Clientset = HashMap<String, AllClients>;
 
 const BUFMSG : usize = 3;
 const MAXURLS : usize = 64;
 
-#[async]
-fn serve_client(handle: Handle, client: UsualClient, all:AllClients) -> Result<(),()> {
-    let (mut sink, stream) = client.split();
-    let (snd,rcv) = futures::sync::mpsc::channel::<OwnedMessage>(BUFMSG);
-    
-    let writer = async_block! {
-        #[async]
-        for m in rcv {
-            let lastone = match &m {
-                &OwnedMessage::Close(_) => true,
-                _ => false,
-            };
-            sink = await!(sink.send(m).map_err(|_|()))?;
-            if lastone { break; }
-        }
-        Ok::<(),()>(())
-    };
-    handle.spawn(writer);
-    
-    let my_id : usize = all.borrow_mut().insert(Rc::new(RefCell::new(snd.clone())));
-    
-    #[async]
-    for m in stream.map_err(|_|()) {
-        if m.is_close() { break; }
+async fn process_client_messages(my_id: usize, sink : ClientSink, mut stream: ClientStream, all: &AllClients) -> Result<()> {
+    while let Some(m) = stream.next().await {
+        let m = m?;
+
+        if m.is_close() { return Ok(()); }
         let fwd = match m {
-            OwnedMessage::Ping(p) => {
-                await!(snd.clone().send(OwnedMessage::Pong(p)).map_err(|_|()))?;
-                continue
+            Message::Ping(p) => {
+                sink.borrow_mut().send(Message::Pong(p)).await?;
+                continue;
             },
-            OwnedMessage::Pong(_) => continue,
+            Message::Pong(_) => continue,
+            Message::Close(_) => break,
             _ => m,
         };
         
         for (id, i) in all.borrow().iter() {
             if id == my_id { continue; }
             
-            // Send if possible, throw away message if not ready
             let mut b = i.borrow_mut();
-            if let Ok(_) = b.start_send(fwd.clone()) {
-                let _ = b.poll_complete();
-            }
+            
+            // Send if possible, throw away message if not ready
+            let _ = b.send(fwd.clone()).now_or_never();
         }
     }
-    
-    if let Some(snd) = all.borrow_mut().remove(my_id) {
-        if let Ok(snd) = Rc::try_unwrap(snd) {
-            let _ = snd.into_inner().send(OwnedMessage::Close(None)).poll();
-        }
-    }
+
     Ok(())
 }
 
-fn main() {
-    let addr : String;
+async fn serve_client(client: UsualClient, all:AllClients) -> Result<()> {
+    
+    let (sink, stream) = client.split();
+    let sink : ClientSink = Rc::new(RefCell::new(sink));
+    
+    
+    let my_id : usize = all.borrow_mut().insert(sink.clone());
+
+    
+    let ret = process_client_messages(my_id, sink, stream, &all).await;
+    
+    let sink = all.borrow_mut().remove(my_id);
+    sink.borrow_mut().send(Message::Close(None)).await?;
+    ret?;
+
+    Ok(())
+}
+
+
+async fn client_accepting_loop(listener: tokio::net::TcpListener) -> Result<()> {
+
+    let mapping : Rc<RefCell<Url2Clientset>> = Rc::new(RefCell::new(HashMap::new()));
+    let num_urls : Rc<Cell<usize>> = Rc::new(Cell::new(0));
+    
+    let mut config = tungstenite::protocol::WebSocketConfig::default();
+
+    config.max_send_queue = Some(BUFMSG);
+
+    loop {
+        let (socket, from_addr) = listener.accept().await?;
+
+        let mapping = mapping.clone();
+        let num_urls = num_urls.clone();
+
+        tokio::task::spawn_local(async move {
+            let mut uri = None;
+            let cb = |rq: &tungstenite::handshake::server::Request, rsp| {
+                uri = Some(rq.uri().to_string());
+                Ok(rsp)
+            };
+            if let Ok(client) = tokio_tungstenite::accept_hdr_async_with_config(socket, cb, Some(config)).await {
+                let url = uri.unwrap_or_else(||"NONE".to_string());
+
+                println!("+ {} -> {}", from_addr, url);
+
+                let clientset : AllClients;
+                {
+                    let mut map = mapping.borrow_mut();
+                    
+                    if !map.contains_key(&*url) {
+                        if num_urls.get() >= MAXURLS {
+                            println!("Rejected");
+                            return;
+                        }
+                    
+                        let new_clientset : AllClients = Rc::new(RefCell::new(Slab::new()));
+                        map.insert(url.clone(), new_clientset);
+                        println!("New URL: {}", url);
+                        num_urls.set(num_urls.get() + 1);
+                    }
+
+                    clientset = map.get(&*url).unwrap().clone();
+                }
+
+                if let Err(e) = serve_client(client, clientset).await {
+                    if !e.to_string().contains("Connection closed normally") {
+                        println!("Error serving client: {}", e);
+                    }
+                }
+
+                {
+                    let mut map = mapping.borrow_mut();
+
+                    let mut do_remove = false;
+                    if let Some(x) = map.get(&*url) {
+                        if (*x).borrow().len() == 0 {
+                            println!("Expiring URL: {}", url);
+                            do_remove = true;
+                        }
+                    }
+                    if do_remove {
+                        map.remove(&*url);
+                        num_urls.set(num_urls.get() - 1);
+                    }
+                }
+                
+                println!("- {} -> {}", from_addr, url);
+            } else {
+                println!("Failed WebSocket connection attempt from {}", from_addr);
+            }
+
+        });
+    }
+}
+
+#[tokio::main(flavor="current_thread")]
+async fn main() -> Result<()> {
+    let listen_addr : String;
     
     {
         let a = std::env::args().collect::<Vec<_>>();
@@ -90,71 +153,12 @@ fn main() {
             println!("Usage: wsbroad listen_ip:listen_port");
             ::std::process::exit(1);
         }
-        addr = a[1].clone();
+        listen_addr = a[1].clone();
     }
 
-    let mut core = Core::new().unwrap();
-    let handle = core.handle();
-    let server = Server::bind(addr, &handle).unwrap();
 
-    let str = server.incoming().map_err(|_|());
-    
-    let mapping : Rc<RefCell<Url2Clientset>> = Rc::new(RefCell::new(HashMap::new()));
-    let num_urls : Rc<Cell<usize>> = Rc::new(Cell::new(0));
-    
-    let f = async_block! {
-        #[async]
-        for (upgrade, addr) in str {
-            let url = format!("{}", upgrade.request.subject.1);
-            println!("+ {} -> {}", addr, url);
-            let (addr2, url2) = (addr.clone(), url.clone());
-            
-            let num_urls2 = num_urls.clone();
-            let map_ = mapping.clone();
-            let map2_ = mapping.clone();
-            {
-                let mut map = map_.borrow_mut();
-                
-                if !map.contains_key(&*url) {
-                    if num_urls.get() >= MAXURLS {
-                        println!("Rejected");
-                        handle.spawn(upgrade.reject().map_err(|_|()).map(|_|()));
-                        continue;
-                    }
-                
-                    let new_clientset : AllClients = Rc::new(RefCell::new(CompactMap::new()));
-                    map.insert(url.clone(), new_clientset);
-                    println!("New URL: {}", url);
-                    num_urls.set(num_urls.get() + 1);
-                }
-            }
-            
-            let (client, _headers) = await!(upgrade.accept().map_err(|_|()))?;
-            
-            let map = map_.borrow_mut();
-            let clientset : AllClients = map.get(&*url).unwrap().clone();
-            
-            let f = serve_client(handle.clone(), client, clientset);
-            
-            handle.spawn(f.map_err(|_|()).map(move |_|{
-                println!("- {} -> {}", addr2, url2);
-                
-                let mut map = map2_.borrow_mut();
-                let mut do_remove = false;
-                if let Some(x) = map.get(&*url2) {
-                    if (*x).borrow().len_slow() == 0 {
-                        println!("Expiring URL: {}", url2);
-                        do_remove = true;
-                    }
-                }
-                if do_remove {
-                    map.remove(&*url2);
-                    num_urls2.set(num_urls2.get() - 1);
-                }
-            }));
-        }
-        Ok::<(),()>(())
-    };
+    let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
 
-    core.run(f).unwrap();
+    let ls = tokio::task::LocalSet::new();
+    ls.run_until(client_accepting_loop(listener)).await
 }
