@@ -1,7 +1,7 @@
 [package]
 name = "wsbroad"
 description = "Websocket server that broadcasts each message to other clients connected to the same URL"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Vitaly _Vi Shukela <vi0oss@gmail.com>"]
 keywords = ["websocket", "websockets", "rfc6455", "broadcast", "nightly"]
 repository = "https://github.com/vi/wsbroad"
@@ -15,4 +15,4 @@ futures = "0.3.8"
 slab = "0.4.2"
 tokio = {version = "0.3", features=["net","rt","macros","sync"]}
 tokio-tungstenite = "0.12.0"
-tungstenite = "0.11.1"
+tungstenite = {version="0.11.1", default_features=false}
