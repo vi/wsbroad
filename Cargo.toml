@@ -5,6 +5,7 @@ version = "0.2.2"
 authors = ["Vitaly _Vi Shukela <vi0oss@gmail.com>"]
 keywords = ["websocket", "websockets", "rfc6455", "broadcast", "nightly"]
 repository = "https://github.com/vi/wsbroad"
+include = ["src","Cargo.toml","LICENSE","README.md"]
 categories = ["command-line-utilities", "network-programming", "web-programming", "web-programming::websocket"]
 license = "MIT/Apache-2.0"
 edition = "2018"
