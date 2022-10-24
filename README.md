@@ -18,3 +18,7 @@ Expiring URL: /baz
 For `wss://` server use some Nginx forwarding.
 
 See [Github releases](https://github.com/vi/wsbroad/releases/) for pre-built versions.
+
+# See also
+
+* https://github.com/vi/postsse for similar application, but for HTTP POST and HTTP GET (SSE) instead of WebSockets.
