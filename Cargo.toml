@@ -15,15 +15,5 @@ anyhow = "1.0.36"
 futures = "0.3.8"
 slab = "0.4.2"
 tokio = {version = "1", features=["net","rt","macros","sync"]}
-tokio-tungstenite = "0.17"
-tungstenite = {version="0.17", default_features=false}
-
-[profile.release]
-opt-level = "s"
-debug = 1
-rpath = false
-lto = true
-debug-assertions = false
-codegen-units = 1
-incremental = false
-panic = 'abort'
+tokio-tungstenite = "0.19"
+tungstenite = {version="0.19", default_features=false}
