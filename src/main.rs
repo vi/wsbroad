@@ -1,4 +1,5 @@
 use futures::{StreamExt,SinkExt,FutureExt};
+use tokio_listener::{Listener, ListenerAddress,UnixChmodVariant,Connection};
 
 use std::rc::Rc;
 use std::cell::{RefCell,Cell};
@@ -10,7 +11,7 @@ type Result<T> = std::result::Result<T, anyhow::Error>;
 
 use tungstenite::Message;
 
-type UsualClient = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+type UsualClient = tokio_tungstenite::WebSocketStream<Connection>;
 
 type ClientSink = Rc<RefCell< futures::stream::SplitSink<UsualClient, Message>  >>;
 type ClientStream = futures::stream::SplitStream<UsualClient>;
@@ -67,7 +68,7 @@ async fn serve_client(client: UsualClient, all:AllClients) -> Result<()> {
 }
 
 
-async fn client_accepting_loop(listener: tokio::net::TcpListener) -> Result<()> {
+async fn client_accepting_loop(listener: &mut Listener) -> Result<()> {
 
     let mapping : Rc<RefCell<Url2Clientset>> = Rc::new(RefCell::new(HashMap::new()));
     let num_urls : Rc<Cell<usize>> = Rc::new(Cell::new(0));
@@ -145,20 +146,46 @@ async fn client_accepting_loop(listener: tokio::net::TcpListener) -> Result<()> 
 
 #[tokio::main(flavor="current_thread")]
 async fn main() -> Result<()> {
-    let listen_addr : String;
+    let flags = xflags::parse_or_exit!(
+        /// TCP or other socket socket address to bind and listen for incoming WebSocket connections
+        /// 
+        /// Specify `sd-listen` for socket-activated mode, file path for UNIX socket (start abstrat addresses with @).
+        required listen_addr: ListenerAddress
+
+        /// remove UNIX socket prior to binding to it
+        optional --unix-listen-unlink
+
+        /// change filesystem mode of the newly bound UNIX socket to `owner` (006), `group` (066) or `everybody` (666)
+        optional --unix-listen-chmod  mode: UnixChmodVariant
+
+        /// change owner user of the newly bound UNIX socket to this numeric uid
+        
+        optional --unix-listen-uid uid: u32
+
+        /// change owner group of the newly bound UNIX socket to this numeric uid
+        
+        optional  --unix-listen-gid uid: u32
+
+        /// ignore environment variables like LISTEN_PID or LISTEN_FDS and unconditionally use file descritor `3` as a socket in
+        /// sd-listen or sd-listen-unix modes
+        optional  --sd-accept-ignore-environment
+    );
+
+    let listen_addr : ListenerAddress = flags.listen_addr;
     
-    {
-        let a = std::env::args().collect::<Vec<_>>();
-        if a.len() != 2 || a[1] == "--help" || a[1] == "-?" {
-            println!("Usage: wsbroad listen_ip:listen_port");
-            ::std::process::exit(1);
-        }
-        listen_addr = a[1].clone();
-    }
+    let mut sopts = tokio_listener::SystemOptions::default();
+    sopts.nodelay = true;
+    sopts.sleep_on_errors = true;
 
+    let mut uopts = tokio_listener::UserOptions::default();
+    uopts.unix_listen_unlink = flags.unix_listen_unlink;
+    uopts.unix_listen_chmod = flags.unix_listen_chmod;
+    uopts.unix_listen_uid = flags.unix_listen_uid;
+    uopts.unix_listen_gid = flags.unix_listen_gid;
+    uopts.sd_accept_ignore_environment = flags.sd_accept_ignore_environment;
 
-    let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
+    let mut listener = Listener::bind(&listen_addr, &sopts, &uopts).await?;
 
     let ls = tokio::task::LocalSet::new();
-    ls.run_until(client_accepting_loop(listener)).await
+    ls.run_until(client_accepting_loop(&mut listener)).await
 }
