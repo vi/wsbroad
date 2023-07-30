@@ -18,7 +18,7 @@ type ClientStream = futures::stream::SplitStream<UsualClient>;
 type AllClients = Rc<RefCell<Slab<ClientSink>>>;
 type Url2Clientset = HashMap<String, AllClients>;
 
-const MAXURLS : usize = 64;
+const DEFAULT_MAXURLS : usize = 64;
 
 async fn process_client_messages(my_id: usize, sink : ClientSink, mut stream: ClientStream, all: &AllClients) -> Result<()> {
     while let Some(m) = stream.next().await {
@@ -80,6 +80,8 @@ async fn client_accepting_loop(listener: &mut Listener, flags: &flags::Wsbroad) 
     config.max_frame_size = Some(flags.max_frame_size.unwrap_or(1*1024*1024));
     config.accept_unmasked_frames = flags.accept_unmasked_frames;
 
+    let max_urls = flags.max_urls.unwrap_or(DEFAULT_MAXURLS);
+
     loop {
         let (socket, from_addr) = listener.accept().await?;
 
@@ -102,7 +104,7 @@ async fn client_accepting_loop(listener: &mut Listener, flags: &flags::Wsbroad) 
                     let mut map = mapping.borrow_mut();
                     
                     if !map.contains_key(&*url) {
-                        if num_urls.get() >= MAXURLS {
+                        if num_urls.get() >= max_urls {
                             println!("Rejected");
                             return;
                         }
@@ -190,6 +192,9 @@ mod flags {
 
             // When set, the server will accept and handle unmasked frames from the client (ignoring the RFC requirement).
             optional --accept-unmasked-frames
+
+            /// Maximum number of URLs to handle before rejecting the new ones
+            optional --max-urls num : usize
         }
     }
     // generated start
@@ -209,6 +214,7 @@ mod flags {
         pub max_message_size: Option<usize>,
         pub max_frame_size: Option<usize>,
         pub accept_unmasked_frames: bool,
+        pub max_urls: Option<usize>,
     }
 
     impl Wsbroad {
