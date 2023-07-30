@@ -18,7 +18,6 @@ type ClientStream = futures::stream::SplitStream<UsualClient>;
 type AllClients = Rc<RefCell<Slab<ClientSink>>>;
 type Url2Clientset = HashMap<String, AllClients>;
 
-const BUFMSG : usize = 3;
 const MAXURLS : usize = 64;
 
 async fn process_client_messages(my_id: usize, sink : ClientSink, mut stream: ClientStream, all: &AllClients) -> Result<()> {
@@ -75,7 +74,8 @@ async fn client_accepting_loop(listener: &mut Listener) -> Result<()> {
     
     let mut config = tungstenite::protocol::WebSocketConfig::default();
 
-    config.max_send_queue = Some(BUFMSG);
+    config.max_write_buffer_size = 1024*1024;
+    config.write_buffer_size = 0; // TODO: reconsider this
 
     loop {
         let (socket, from_addr) = listener.accept().await?;
