@@ -1,8 +1,8 @@
-use futures::{StreamExt,SinkExt,FutureExt};
-use tokio_listener::{Listener, Connection};
+use futures::{FutureExt, SinkExt, StreamExt};
+use tokio_listener::{Connection, Listener};
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::cell::{RefCell,Cell};
 
 use slab::Slab;
 use std::collections::HashMap;
@@ -13,73 +13,105 @@ use tungstenite::Message;
 
 type UsualClient = tokio_tungstenite::WebSocketStream<Connection>;
 
-type ClientSink = Rc<RefCell< futures::stream::SplitSink<UsualClient, Message>  >>;
+type ClientSink = Rc<tokio::sync::Mutex<futures::stream::SplitSink<UsualClient, Message>>>;
 type ClientStream = futures::stream::SplitStream<UsualClient>;
 type AllClients = Rc<RefCell<Slab<ClientSink>>>;
 type Url2Clientset = HashMap<String, AllClients>;
 
-const DEFAULT_MAXURLS : usize = 64;
+const DEFAULT_MAXURLS: usize = 64;
 
-async fn process_client_messages(my_id: usize, sink : ClientSink, mut stream: ClientStream, all: &AllClients, flags: &flags::Wsbroad) -> Result<()> {
+async fn process_client_messages(
+    my_id: usize,
+    sink: ClientSink,
+    mut stream: ClientStream,
+    all: &AllClients,
+    flags: &flags::Wsbroad,
+) -> Result<()> {
+    let mut ids_for_backpressure = vec![];
     while let Some(m) = stream.next().await {
         let m = m?;
 
-        if m.is_close() { return Ok(()); }
+        if m.is_close() {
+            return Ok(());
+        }
         let fwd = match m {
             Message::Ping(p) => {
-                sink.borrow_mut().send(Message::Pong(p)).await?;
+                sink.lock().await.send(Message::Pong(p)).await?;
                 continue;
-            },
+            }
             Message::Pong(_) => continue,
             Message::Close(_) => break,
             _ => m,
         };
-        
-        for (id, i) in all.borrow().iter() {
-            if !flags.reflexive {
-                if id == my_id { continue; }
+
+        if flags.backpressure || flags.backpressure_with_errors {
+            ids_for_backpressure.clear();
+            ids_for_backpressure.extend(
+                all.borrow()
+                    .iter()
+                    .map(|(id, _)| id)
+                    .filter(|id| flags.reflexive || *id != my_id),
+            );
+
+            for &id in &ids_for_backpressure {
+                let all_borrowed = all.borrow();
+                if let Some(cs) = all_borrowed.get(id).cloned() {
+                    drop(all_borrowed);
+                    let mut cs_lock = cs.lock().await;
+                    let ret = cs_lock.send(fwd.clone()).await;
+                    drop(cs_lock);
+
+                    if flags.backpressure_with_errors {
+                        ret?;
+                    }
+                } else {
+                    // client gone
+                }
             }
-            
-            let mut b = i.borrow_mut();
-            
-            // Send if possible, throw away message if not ready
-            let _ = b.send(fwd.clone()).now_or_never();
+        } else {
+            for (id, i) in all.borrow().iter() {
+                if !flags.reflexive {
+                    if id == my_id {
+                        continue;
+                    }
+                }
+
+                // should be always uncontended when backpressure is not enabled
+                let mut cs_lock = i.lock().await;
+
+                let _ = cs_lock.send(fwd.clone()).now_or_never();
+            }
         }
     }
 
     Ok(())
 }
 
-async fn serve_client(client: UsualClient, all:AllClients, flags: &flags::Wsbroad) -> Result<()> {
-    
+async fn serve_client(client: UsualClient, all: AllClients, flags: &flags::Wsbroad) -> Result<()> {
     let (sink, stream) = client.split();
-    let sink : ClientSink = Rc::new(RefCell::new(sink));
-    
-    
-    let my_id : usize = all.borrow_mut().insert(sink.clone());
+    let sink: ClientSink = Rc::new(tokio::sync::Mutex::new(sink));
 
-    
+    let my_id: usize = all.borrow_mut().insert(sink.clone());
+
     let ret = process_client_messages(my_id, sink, stream, &all, flags).await;
-    
+
     let sink = all.borrow_mut().remove(my_id);
-    sink.borrow_mut().send(Message::Close(None)).await?;
+    sink.lock().await.send(Message::Close(None)).await?;
     ret?;
 
     Ok(())
 }
 
-
 async fn client_accepting_loop(listener: &mut Listener, flags: Rc<flags::Wsbroad>) -> Result<()> {
+    let mapping: Rc<RefCell<Url2Clientset>> = Rc::new(RefCell::new(HashMap::new()));
+    let num_urls: Rc<Cell<usize>> = Rc::new(Cell::new(0));
 
-    let mapping : Rc<RefCell<Url2Clientset>> = Rc::new(RefCell::new(HashMap::new()));
-    let num_urls : Rc<Cell<usize>> = Rc::new(Cell::new(0));
-    
     let mut config = tungstenite::protocol::WebSocketConfig::default();
 
-    config.write_buffer_size = flags.write_buffer_size.unwrap_or(128*1024);
-    config.max_write_buffer_size = flags.max_write_buffer_size.unwrap_or(4*1024*1024);
-    config.max_message_size = Some(flags.max_message_size.unwrap_or(1*1024*1024));
-    config.max_frame_size = Some(flags.max_frame_size.unwrap_or(1*1024*1024));
+    config.write_buffer_size = flags.write_buffer_size.unwrap_or(128 * 1024);
+    config.max_write_buffer_size = flags.max_write_buffer_size.unwrap_or(4 * 1024 * 1024);
+    config.max_message_size = Some(flags.max_message_size.unwrap_or(1 * 1024 * 1024));
+    config.max_frame_size = Some(flags.max_frame_size.unwrap_or(1 * 1024 * 1024));
     config.accept_unmasked_frames = flags.accept_unmasked_frames;
 
     let max_urls = flags.max_urls.unwrap_or(DEFAULT_MAXURLS);
@@ -97,22 +129,24 @@ async fn client_accepting_loop(listener: &mut Listener, flags: Rc<flags::Wsbroad
                 uri = Some(rq.uri().to_string());
                 Ok(rsp)
             };
-            if let Ok(client) = tokio_tungstenite::accept_hdr_async_with_config(socket, cb, Some(config)).await {
-                let url = uri.unwrap_or_else(||"NONE".to_string());
+            if let Ok(client) =
+                tokio_tungstenite::accept_hdr_async_with_config(socket, cb, Some(config)).await
+            {
+                let url = uri.unwrap_or_else(|| "NONE".to_string());
 
                 println!("+ {} -> {}", from_addr, url);
 
-                let clientset : AllClients;
+                let clientset: AllClients;
                 {
                     let mut map = mapping.borrow_mut();
-                    
+
                     if !map.contains_key(&*url) {
                         if num_urls.get() >= max_urls {
                             println!("Rejected");
                             return;
                         }
-                    
-                        let new_clientset : AllClients = Rc::new(RefCell::new(Slab::new()));
+
+                        let new_clientset: AllClients = Rc::new(RefCell::new(Slab::new()));
                         map.insert(url.clone(), new_clientset);
                         println!("New URL: {}", url);
                         num_urls.set(num_urls.get() + 1);
@@ -122,7 +156,10 @@ async fn client_accepting_loop(listener: &mut Listener, flags: Rc<flags::Wsbroad
                 }
 
                 if let Err(e) = serve_client(client, clientset, &*flags).await {
-                    if !e.to_string().contains("Connection closed normally") {
+                    if !e
+                        .to_string()
+                        .contains("Trying to work with closed connection")
+                    {
                         println!("Error serving client: {}", e);
                     }
                 }
@@ -142,25 +179,24 @@ async fn client_accepting_loop(listener: &mut Listener, flags: Rc<flags::Wsbroad
                         num_urls.set(num_urls.get() - 1);
                     }
                 }
-                
+
                 println!("- {} -> {}", from_addr, url);
             } else {
                 println!("Failed WebSocket connection attempt from {}", from_addr);
             }
-
         });
     }
 }
 
 mod flags {
-    use tokio_listener::{ListenerAddress,UnixChmodVariant};
+    use tokio_listener::{ListenerAddress, UnixChmodVariant};
 
     xflags::xflags! {
         src "./src/main.rs"
 
         cmd wsbroad {
             /// TCP or other socket socket address to bind and listen for incoming WebSocket connections
-            /// 
+            ///
             /// Specify `sd-listen` for socket-activated mode, file path for UNIX socket (start abstrat addresses with @).
             required listen_addr: ListenerAddress
 
@@ -201,6 +237,18 @@ mod flags {
 
             /// Also send messages back to the sender
             optional --reflexive
+
+            /// Slow down senders if there are active receives that are
+            /// unable to take all the messages fast enough.
+            /// Makes messages reliable.
+            optional --backpressure
+
+            /// Similar to --backpressure, but also disconnect senders to an URL if
+            /// we detected that some receiver is abruptly gone.
+            ///
+            /// Abruptly means we detected an error when trying to send some data to the
+            /// client's socket, not to receive from it.
+            optional --backpressure-with-errors
         }
     }
     // generated start
@@ -222,6 +270,8 @@ mod flags {
         pub accept_unmasked_frames: bool,
         pub max_urls: Option<usize>,
         pub reflexive: bool,
+        pub backpressure: bool,
+        pub backpressure_with_errors: bool,
     }
 
     impl Wsbroad {
@@ -243,10 +293,10 @@ mod flags {
     // generated end
 }
 
-#[tokio::main(flavor="current_thread")]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let flags = flags::Wsbroad::from_env_or_exit();
-    
+
     let mut sopts = tokio_listener::SystemOptions::default();
     sopts.nodelay = true;
     sopts.sleep_on_errors = true;
@@ -261,5 +311,6 @@ async fn main() -> Result<()> {
     let mut listener = Listener::bind(&flags.listen_addr, &sopts, &uopts).await?;
 
     let ls = tokio::task::LocalSet::new();
-    ls.run_until(client_accepting_loop(&mut listener, Rc::new(flags))).await
+    ls.run_until(client_accepting_loop(&mut listener, Rc::new(flags)))
+        .await
 }
