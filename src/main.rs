@@ -20,7 +20,7 @@ type Url2Clientset = HashMap<String, AllClients>;
 
 const DEFAULT_MAXURLS : usize = 64;
 
-async fn process_client_messages(my_id: usize, sink : ClientSink, mut stream: ClientStream, all: &AllClients) -> Result<()> {
+async fn process_client_messages(my_id: usize, sink : ClientSink, mut stream: ClientStream, all: &AllClients, flags: &flags::Wsbroad) -> Result<()> {
     while let Some(m) = stream.next().await {
         let m = m?;
 
@@ -36,7 +36,9 @@ async fn process_client_messages(my_id: usize, sink : ClientSink, mut stream: Cl
         };
         
         for (id, i) in all.borrow().iter() {
-            if id == my_id { continue; }
+            if !flags.reflexive {
+                if id == my_id { continue; }
+            }
             
             let mut b = i.borrow_mut();
             
@@ -48,7 +50,7 @@ async fn process_client_messages(my_id: usize, sink : ClientSink, mut stream: Cl
     Ok(())
 }
 
-async fn serve_client(client: UsualClient, all:AllClients) -> Result<()> {
+async fn serve_client(client: UsualClient, all:AllClients, flags: &flags::Wsbroad) -> Result<()> {
     
     let (sink, stream) = client.split();
     let sink : ClientSink = Rc::new(RefCell::new(sink));
@@ -57,7 +59,7 @@ async fn serve_client(client: UsualClient, all:AllClients) -> Result<()> {
     let my_id : usize = all.borrow_mut().insert(sink.clone());
 
     
-    let ret = process_client_messages(my_id, sink, stream, &all).await;
+    let ret = process_client_messages(my_id, sink, stream, &all, flags).await;
     
     let sink = all.borrow_mut().remove(my_id);
     sink.borrow_mut().send(Message::Close(None)).await?;
@@ -67,7 +69,7 @@ async fn serve_client(client: UsualClient, all:AllClients) -> Result<()> {
 }
 
 
-async fn client_accepting_loop(listener: &mut Listener, flags: &flags::Wsbroad) -> Result<()> {
+async fn client_accepting_loop(listener: &mut Listener, flags: Rc<flags::Wsbroad>) -> Result<()> {
 
     let mapping : Rc<RefCell<Url2Clientset>> = Rc::new(RefCell::new(HashMap::new()));
     let num_urls : Rc<Cell<usize>> = Rc::new(Cell::new(0));
@@ -88,6 +90,7 @@ async fn client_accepting_loop(listener: &mut Listener, flags: &flags::Wsbroad) 
         let mapping = mapping.clone();
         let num_urls = num_urls.clone();
 
+        let flags = flags.clone();
         tokio::task::spawn_local(async move {
             let mut uri = None;
             let cb = |rq: &tungstenite::handshake::server::Request, rsp| {
@@ -118,7 +121,7 @@ async fn client_accepting_loop(listener: &mut Listener, flags: &flags::Wsbroad) 
                     clientset = map.get(&*url).unwrap().clone();
                 }
 
-                if let Err(e) = serve_client(client, clientset).await {
+                if let Err(e) = serve_client(client, clientset, &*flags).await {
                     if !e.to_string().contains("Connection closed normally") {
                         println!("Error serving client: {}", e);
                     }
@@ -195,6 +198,9 @@ mod flags {
 
             /// Maximum number of URLs to handle before rejecting the new ones
             optional --max-urls num : usize
+
+            /// Also send messages back to the sender
+            optional --reflexive
         }
     }
     // generated start
@@ -215,6 +221,7 @@ mod flags {
         pub max_frame_size: Option<usize>,
         pub accept_unmasked_frames: bool,
         pub max_urls: Option<usize>,
+        pub reflexive: bool,
     }
 
     impl Wsbroad {
@@ -254,5 +261,5 @@ async fn main() -> Result<()> {
     let mut listener = Listener::bind(&flags.listen_addr, &sopts, &uopts).await?;
 
     let ls = tokio::task::LocalSet::new();
-    ls.run_until(client_accepting_loop(&mut listener, &flags)).await
+    ls.run_until(client_accepting_loop(&mut listener, Rc::new(flags))).await
 }
