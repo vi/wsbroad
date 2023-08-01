@@ -808,6 +808,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "futures",
+ "rand",
  "slab",
  "tokio",
  "tokio-listener",

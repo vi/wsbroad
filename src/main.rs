@@ -1,4 +1,5 @@
 use futures::{FutureExt, SinkExt, StreamExt};
+use rand::{SeedableRng, Rng};
 use tokio_listener::{Connection, Listener};
 
 use std::cell::{Cell, RefCell};
@@ -13,10 +14,15 @@ use tungstenite::Message;
 
 type UsualClient = tokio_tungstenite::WebSocketStream<Connection>;
 
-type ClientSink = Rc<tokio::sync::Mutex<futures::stream::SplitSink<UsualClient, Message>>>;
 type ClientStream = futures::stream::SplitStream<UsualClient>;
 type AllClients = Rc<RefCell<Slab<ClientSink>>>;
 type Url2Clientset = HashMap<String, AllClients>;
+
+#[derive(Clone)]
+struct ClientSink {
+    s: Rc<tokio::sync::Mutex<futures::stream::SplitSink<UsualClient, Message>>>,
+    queue: Option<Rc<tokio::sync::mpsc::Sender<Message>>>,
+}
 
 const DEFAULT_MAXURLS: usize = 64;
 
@@ -28,6 +34,7 @@ async fn process_client_messages(
     flags: &flags::Wsbroad,
 ) -> Result<()> {
     let mut ids_for_backpressure = vec![];
+    let mut rng = flags.stochastic_queue.map(|_|rand::rngs::SmallRng::from_entropy());
     while let Some(m) = stream.next().await {
         let m = m?;
 
@@ -36,7 +43,7 @@ async fn process_client_messages(
         }
         let fwd = match m {
             Message::Ping(p) => {
-                sink.lock().await.send(Message::Pong(p)).await?;
+                sink.s.lock().await.send(Message::Pong(p)).await?;
                 continue;
             }
             Message::Pong(_) => continue,
@@ -57,7 +64,8 @@ async fn process_client_messages(
                 let all_borrowed = all.borrow();
                 if let Some(cs) = all_borrowed.get(id).cloned() {
                     drop(all_borrowed);
-                    let mut cs_lock = cs.lock().await;
+                    let mut cs_lock = cs.s.lock().await;
+
                     let ret = cs_lock.send(fwd.clone()).await;
                     drop(cs_lock);
 
@@ -69,6 +77,7 @@ async fn process_client_messages(
                 }
             }
         } else {
+            // must not await inside this loop
             for (id, i) in all.borrow().iter() {
                 if !flags.reflexive {
                     if id == my_id {
@@ -76,10 +85,35 @@ async fn process_client_messages(
                     }
                 }
 
-                // should be always uncontended when backpressure is not enabled
-                let mut cs_lock = i.lock().await;
+                if let Some(ref queue) = i.queue {
+                    // stochastic queue mode
 
-                let _ = cs_lock.send(fwd.clone()).now_or_never();
+                    if queue.max_capacity() == 1 {
+                        let _ = queue.try_send(fwd.clone());
+                    } else {
+                        let mut denominator = queue.max_capacity() as u32;
+                        let mut numerator = queue.capacity() as u32;
+                        if denominator > 2 {
+                            // first half of the queue is a free ride
+                            denominator /= 2;
+                            numerator = numerator.saturating_sub(denominator);
+                            denominator += 1;
+                        } else {
+                            denominator += 1;
+                        }
+                        if rng.as_mut().unwrap().gen_ratio(numerator, denominator) {
+                            let _ = queue.try_send(fwd.clone());
+                        } else {
+                            // actively drop message
+                        }
+                    }
+                } else {
+                    // should be always uncontended when backpressure is not enabled and qlen is not used
+                    if let Ok(mut cs_lock) = i.s.try_lock() {
+                        let _ = cs_lock.send(fwd.clone()).now_or_never();
+                        drop(cs_lock);
+                    }
+                }
             }
         }
     }
@@ -88,15 +122,41 @@ async fn process_client_messages(
 }
 
 async fn serve_client(client: UsualClient, all: AllClients, flags: &flags::Wsbroad) -> Result<()> {
-    let (sink, stream) = client.split();
-    let sink: ClientSink = Rc::new(tokio::sync::Mutex::new(sink));
+    let (ws_write_part, ws_read_part) = client.split();
+
+    let s = Rc::new(tokio::sync::Mutex::new(ws_write_part));
+    let mut sink = ClientSink {
+        s,
+        queue: None,
+    };  
+
+    let jh = if let Some(slen) = flags.stochastic_queue {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(slen);
+        let s2 = sink.s.clone();
+        let jh = tokio::task::spawn_local(async move {
+            while let Some(msg) = rx.recv().await {
+                if s2.lock().await.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+        sink.queue = Some(Rc::new(tx));
+        Some(jh)
+    } else {
+        None
+    };
 
     let my_id: usize = all.borrow_mut().insert(sink.clone());
 
-    let ret = process_client_messages(my_id, sink, stream, &all, flags).await;
+    let ret = process_client_messages(my_id, sink, ws_read_part, &all, flags).await;
+
+    if let Some(jh) = jh {
+        jh.abort();
+        let _ = jh.await;
+    }
 
     let sink = all.borrow_mut().remove(my_id);
-    sink.lock().await.send(Message::Close(None)).await?;
+    sink.s.lock().await.send(Message::Close(None)).await?;
     ret?;
 
     Ok(())
@@ -194,7 +254,7 @@ async fn client_accepting_loop(listener: &mut Listener, flags: Rc<flags::Wsbroad
 }
 
 mod flags {
-    use tokio_listener::{ListenerAddress, UnixChmodVariant, TcpKeepaliveParams};
+    use tokio_listener::{ListenerAddress, TcpKeepaliveParams, UnixChmodVariant};
 
     xflags::xflags! {
         src "./src/main.rs"
@@ -225,6 +285,8 @@ mod flags {
             optional --tcp-keepalive ka_triplet: TcpKeepaliveParams
 
             /// try to set SO_REUSEPORT, so that multiple processes can accept connections from the same port in a round-robin fashion.
+            ///
+            /// Obviously, URL domains would be different based on which instance does the client land.
             optional --tcp-reuse-port
 
             /// set socket's IPV6_V6ONLY to true, to avoid receiving IPv4 connections on IPv6 socket
@@ -243,16 +305,16 @@ mod flags {
 
             /// The target minimum size of the in-app write buffer to reach before writing the data to the underlying stream.
             /// The default value is 128 KiB, but wsbroad flushes after sending every message, so this may be unrelevant.
-            /// 
+            ///
             /// May be 0. Needs to be less that --max-write-buffer-size.
             optional --write-buffer-size size_bytes: usize
 
             /// The max size of the in-app write buffer in bytes. Default is 4 MiB.
-            /// 
-            /// This affects how much messages get buffered before droppign 
+            ///
+            /// This affects how much messages get buffered before droppign
             /// or slowing down sender begins. Note that --send-buffer-size also affects
             /// this behaviour.
-            /// 
+            ///
             /// Also indirectly affects max message size
             optional --max-write-buffer-size size_bytes: usize
 
@@ -285,6 +347,18 @@ mod flags {
 
             /// Set TCP_NODELAY to deliver small messages with less latency
             optional --nodelay
+
+            /// drop messages to slow receivers not in clusters (i.e. multiple dropped messages in a row),
+            /// but with increasing probability based on congestion level.
+            /// Value is maximum additional queue length. The bigger - the more uniformly message going to be
+            /// dropped when overloaded, but the higher there may be latency for message that go though
+            /// 
+            /// Short queue descreases thgouhput.
+            ///
+            /// Note that other buffers (--max-write-buffer-size and --send-buffer-size) still apply after this queue.
+            /// 
+            /// Unlike other options, the unit is messages, not bytes
+            optional --stochastic-queue qlen: usize
         }
     }
     // generated start
@@ -315,6 +389,7 @@ mod flags {
         pub backpressure: bool,
         pub backpressure_with_errors: bool,
         pub nodelay: bool,
+        pub stochastic_queue: Option<usize>,
     }
 
     impl Wsbroad {
@@ -355,7 +430,11 @@ async fn main() -> Result<()> {
     uopts.tcp_only_v6 = flags.tcp_only_v6;
     uopts.tcp_listen_backlog = flags.tcp_listen_backlog;
     uopts.recv_buffer_size = flags.recv_buffer_size;
-    uopts.send_buffer_size = flags.send_buffer_size;    
+    uopts.send_buffer_size = flags.send_buffer_size;
+
+    if flags.stochastic_queue.is_some() && (flags.backpressure || flags.backpressure_with_errors) {
+        anyhow::bail!("--stochastic-queue is incompatibel with --backpressure");
+    }
 
     let mut listener = Listener::bind(&flags.listen_addr, &sopts, &uopts).await?;
 
