@@ -189,7 +189,7 @@ async fn client_accepting_loop(listener: &mut Listener, flags: Rc<flags::Wsbroad
 }
 
 mod flags {
-    use tokio_listener::{ListenerAddress, UnixChmodVariant};
+    use tokio_listener::{ListenerAddress, UnixChmodVariant, TcpKeepaliveParams};
 
     xflags::xflags! {
         src "./src/main.rs"
@@ -216,11 +216,39 @@ mod flags {
             /// sd-listen or sd-listen-unix modes
             optional  --sd-accept-ignore-environment
 
-            /// The target minimum size of the write buffer to reach before writing the data to the underlying stream.
+            // set SO_KEEPALIVE settings for each accepted TCP connection. Value is a colon-separated triplet of time_ms:count:interval_ms, each of which is optional.
+            optional --tcp-keepalive ka_triplet: TcpKeepaliveParams
+
+            /// try to set SO_REUSEPORT, so that multiple processes can accept connections from the same port in a round-robin fashion.
+            optional --tcp-reuse-port
+
+            /// set socket's IPV6_V6ONLY to true, to avoid receiving IPv4 connections on IPv6 socket
+            optional --tcp-only-v6
+
+            /// Maximum number of pending unaccepted connections
+            optional --tcp-listen-backlog bl : u32
+
+            /// Set size of socket receive buffer size
+            optional --recv-buffer-size sz: usize
+
+            /// Set size of socket send buffer size in operating system.
+            /// Together with --max-write-buffer-size, it may affect latency when
+            /// messages need to be dropped on overload
+            optional  --send-buffer-size sz: usize
+
+            /// The target minimum size of the in-app write buffer to reach before writing the data to the underlying stream.
             /// The default value is 128 KiB, but wsbroad flushes after sending every message, so this may be unrelevant.
+            /// 
+            /// May be 0. Needs to be less that --max-write-buffer-size.
             optional --write-buffer-size size_bytes: usize
 
-            /// The max size of the write buffer in bytes. Default is 4 MiB.
+            /// The max size of the in-app write buffer in bytes. Default is 4 MiB.
+            /// 
+            /// This affects how much messages get buffered before droppign 
+            /// or slowing down sender begins. Note that --send-buffer-size also affects
+            /// this behaviour.
+            /// 
+            /// Also indirectly affects max message size
             optional --max-write-buffer-size size_bytes: usize
 
             /// The maximum size of a message. Default is 1 MiB.
@@ -263,6 +291,12 @@ mod flags {
         pub unix_listen_uid: Option<u32>,
         pub unix_listen_gid: Option<u32>,
         pub sd_accept_ignore_environment: bool,
+        pub tcp_keepalive: Option<TcpKeepaliveParams>,
+        pub tcp_reuse_port: bool,
+        pub tcp_only_v6: bool,
+        pub tcp_listen_backlog: Option<u32>,
+        pub recv_buffer_size: Option<usize>,
+        pub send_buffer_size: Option<usize>,
         pub write_buffer_size: Option<usize>,
         pub max_write_buffer_size: Option<usize>,
         pub max_message_size: Option<usize>,
@@ -307,6 +341,12 @@ async fn main() -> Result<()> {
     uopts.unix_listen_uid = flags.unix_listen_uid;
     uopts.unix_listen_gid = flags.unix_listen_gid;
     uopts.sd_accept_ignore_environment = flags.sd_accept_ignore_environment;
+    uopts.tcp_keepalive = flags.tcp_keepalive;
+    uopts.tcp_reuse_port = flags.tcp_reuse_port;
+    uopts.tcp_only_v6 = flags.tcp_only_v6;
+    uopts.tcp_listen_backlog = flags.tcp_listen_backlog;
+    uopts.recv_buffer_size = flags.recv_buffer_size;
+    uopts.send_buffer_size = flags.send_buffer_size;
 
     let mut listener = Listener::bind(&flags.listen_addr, &sopts, &uopts).await?;
 
