@@ -114,6 +114,11 @@ async fn client_accepting_loop(listener: &mut Listener, flags: Rc<flags::Wsbroad
     config.max_frame_size = Some(flags.max_frame_size.unwrap_or(1 * 1024 * 1024));
     config.accept_unmasked_frames = flags.accept_unmasked_frames;
 
+    if config.write_buffer_size + 50 > config.max_write_buffer_size {
+        // prevent deadlocks for some reason
+        config.write_buffer_size = config.max_write_buffer_size.saturating_sub(50);
+    }
+
     let max_urls = flags.max_urls.unwrap_or(DEFAULT_MAXURLS);
 
     loop {
@@ -277,6 +282,9 @@ mod flags {
             /// Abruptly means we detected an error when trying to send some data to the
             /// client's socket, not to receive from it.
             optional --backpressure-with-errors
+
+            /// Set TCP_NODELAY to deliver small messages with less latency
+            optional --nodelay
         }
     }
     // generated start
@@ -306,6 +314,7 @@ mod flags {
         pub reflexive: bool,
         pub backpressure: bool,
         pub backpressure_with_errors: bool,
+        pub nodelay: bool,
     }
 
     impl Wsbroad {
@@ -332,7 +341,7 @@ async fn main() -> Result<()> {
     let flags = flags::Wsbroad::from_env_or_exit();
 
     let mut sopts = tokio_listener::SystemOptions::default();
-    sopts.nodelay = true;
+    sopts.nodelay = flags.nodelay;
     sopts.sleep_on_errors = true;
 
     let mut uopts = tokio_listener::UserOptions::default();
@@ -346,7 +355,7 @@ async fn main() -> Result<()> {
     uopts.tcp_only_v6 = flags.tcp_only_v6;
     uopts.tcp_listen_backlog = flags.tcp_listen_backlog;
     uopts.recv_buffer_size = flags.recv_buffer_size;
-    uopts.send_buffer_size = flags.send_buffer_size;
+    uopts.send_buffer_size = flags.send_buffer_size;    
 
     let mut listener = Listener::bind(&flags.listen_addr, &sopts, &uopts).await?;
 
