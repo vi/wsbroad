@@ -16,7 +16,7 @@ futures = "0.3.8"
 rand = { version = "0.8.5", features = ["small_rng"] }
 slab = "0.4.2"
 tokio = {version = "1", features=["net","rt","macros","sync"]}
-tokio-listener = { version = "0.2.0", default-features = false, features = ["user_facing_default"] }
+tokio-listener = { version = "0.2.1", default-features = false, features = ["user_facing_default"] }
 tokio-tungstenite = "0.20"
 tungstenite = {version="0.20", default_features=false}
 xflags = "0.3.1"
