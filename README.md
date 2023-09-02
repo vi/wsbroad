@@ -1,7 +1,10 @@
 # wsbroad
-Simple websocket broadcaster implemented in Rust
+
+Websocket broadcaster implemented in Rust.
 
 Each WebSocket message sent to a particular URL on this websocket server gets delivered to all other WebSocket clients connected to the same URL. By default allows up to 64 URLs. If client is reading incoming messages too slowly, they are getting dropped for this client; no backpressure and no accumulation of messages in memory (unless you override this with `--backpressure` or other CLI flags).
+
+If you want to base your own project on wsbroad, you may want to use simpler [version 0.2](https://github.com/vi/wsbroad/tree/v0.2.2) without additional features.
 
 ```
 $ wsbroad 127.0.0.1:9002
